@@ -44,6 +44,7 @@ struct task_{
 	event_cbk ev_cbk;
 	uint32_t no_of_invocations;
 	task_type_t task_type;
+	bool re_schedule;
 	glthread_t glue;
 };
 GLTHREAD_TO_STRUCT(glue_to_task,
@@ -123,5 +124,8 @@ pkt_q_enqueue(pkt_q_t *pkt_q,
 
 char *
 task_get_next_pkt(uint32_t *pkt_size);
+
+void
+task_schedule_again(task_t *task);
 
 #endif /* EVENT_DISPATCHER  */

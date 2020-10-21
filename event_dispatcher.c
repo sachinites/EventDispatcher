@@ -69,27 +69,40 @@ event_dispatcher_schedule_task(
 
 static void
 eve_dis_process_task_post_call(task_t *task){
-	
-	if(task->task_type == TASK_ONE_SHOT) {
-		free(task);
-	}
-	else if(task->task_type == TASK_BG){
-		event_dispatcher_schedule_task(task);				
-	}
-	else if(task->task_type == TASK_PKT_Q_JOB) {
 
-		pkt_q_t *pkt_q = (pkt_q_t *)(task->data);
-		pthread_mutex_lock(&pkt_q->q_mutex);
-		if (IS_GLTHREAD_LIST_EMPTY(&pkt_q->q_head)) {
-			if(debug) printf("Queue Exhausted, will stop untill pkt enqueue..\n");
-			pthread_mutex_unlock(&pkt_q->q_mutex);
-			return;
-		}
-		if(debug) printf("more pkts in Queue, will continue..\n");
-		event_dispatcher_schedule_task(task);	
-	}
-	else {
-		assert(0);
+	pkt_q_t *pkt_q;
+
+	switch(task->task_type) {
+
+		case TASK_ONE_SHOT:
+			if(task->re_schedule == false){
+				free(task);
+			}
+			else{
+				task->re_schedule = false;
+				event_dispatcher_schedule_task(task);
+			}
+			break;
+	
+		case TASK_BG:
+			event_dispatcher_schedule_task(task);
+			break;	
+
+		case TASK_PKT_Q_JOB:	
+			pkt_q = (pkt_q_t *)(task->data);
+			pthread_mutex_lock(&pkt_q->q_mutex);
+			
+			if (IS_GLTHREAD_LIST_EMPTY(&pkt_q->q_head)) {
+				if(debug) printf("Queue Exhausted, will stop untill pkt enqueue..\n");
+				pthread_mutex_unlock(&pkt_q->q_mutex);
+				return;
+			}
+			if(debug) printf("more pkts in Queue, will continue..\n");
+			event_dispatcher_schedule_task(task);	
+			break;
+
+		default:
+		;
 	}
 }
 
@@ -154,8 +167,16 @@ create_new_task(void *arg,
 	task->data_size = arg_size;
 	task->ev_cbk = cbk;
 	task->task_type = TASK_ONE_SHOT; /* default */
+	task->re_schedule = false;
 	init_glthread(&task->glue);
 	return task;
+}
+
+void
+task_schedule_again(task_t *task){
+
+	assert(task->task_type == TASK_ONE_SHOT);
+	task->re_schedule = true;
 }
 
 void
