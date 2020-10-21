@@ -24,6 +24,8 @@
 #include "event_dispatcher.h"
 
 static event_dispatcher_t ev_dis;
+bool static debug = true;
+
 
 void
 event_dispatcher_init(){
@@ -36,6 +38,7 @@ event_dispatcher_init(){
 
 	pthread_cond_init(&ev_dis.ev_dis_cond_wait, NULL);
 	ev_dis.thread = NULL;
+	ev_dis.signal_sent = false;
 	ev_dis.current_task = NULL;
 }
 
@@ -47,17 +50,49 @@ event_dispatcher_schedule_task(
 
 	EV_DIS_LOCK(&ev_dis);
 
-	glthread_add_next(&ev_dis.task_array_head, &task->glue);
+	if(debug) printf("Task scheduled to run\n");
+	
+	glthread_add_last(&ev_dis.task_array_head, &task->glue);
 	
 	ev_dis.pending_task_count++;
 
-	if (ev_dis.ev_dis_state == EV_DIS_IDLE) {
+	if (ev_dis.ev_dis_state == EV_DIS_IDLE &&
+		ev_dis.signal_sent == false) {
 
 		pthread_cond_signal(&ev_dis.ev_dis_cond_wait);
+		if(debug) printf("signal sent to dispatcher\n");
+		ev_dis.signal_sent = true;
 	}
 
 	EV_DIS_UNLOCK(&ev_dis);
 }
+
+static void
+eve_dis_process_task_post_call(task_t *task){
+	
+	if(task->task_type == TASK_ONE_SHOT) {
+		free(task);
+	}
+	else if(task->task_type == TASK_BG){
+		event_dispatcher_schedule_task(task);				
+	}
+	else if(task->task_type == TASK_PKT_Q_JOB) {
+
+		pkt_q_t *pkt_q = (pkt_q_t *)(task->data);
+		pthread_mutex_lock(&pkt_q->q_mutex);
+		if (IS_GLTHREAD_LIST_EMPTY(&pkt_q->q_head)) {
+			if(debug) printf("Queue Exhausted, will stop untill pkt enqueue..\n");
+			pthread_mutex_unlock(&pkt_q->q_mutex);
+			return;
+		}
+		if(debug) printf("more pkts in Queue, will continue..\n");
+		event_dispatcher_schedule_task(task);	
+	}
+	else {
+		assert(0);
+	}
+}
+
 
 void *
 event_dispatcher_dispatch_next_task(void *arg) {
@@ -67,20 +102,19 @@ event_dispatcher_dispatch_next_task(void *arg) {
 
 	EV_DIS_LOCK(&ev_dis);
 
-	if (ev_dis.ev_dis_state == EV_DIS_TASK_FIN_WAIT){
-		EV_DIS_UNLOCK(&ev_dis);
-		return 0;
-	}
+	if(debug) printf("Dispatcher Thread started\n");
 
 	while(1) {
-		//sleep(1);	
+		
 		first_node = dequeue_glthread_first(&ev_dis.task_array_head);
 
 		if(!first_node) {
 			ev_dis.ev_dis_state = EV_DIS_IDLE;
-			printf("EVE DIS moved to IDLE STATE\n");
+			if(debug) printf("No Task to run, EVE DIS moved to IDLE STATE\n");
+			ev_dis.signal_sent = false;
 			pthread_cond_wait(&ev_dis.ev_dis_cond_wait,
 					&ev_dis.ev_dis_mutex);
+			if(debug) printf("Eve Dis recvd Signal, woken up\n");
 		}
 		else {
 			ev_dis.pending_task_count--;
@@ -89,10 +123,20 @@ event_dispatcher_dispatch_next_task(void *arg) {
 			
 			if(ev_dis.ev_dis_state != EV_DIS_TASK_FIN_WAIT){
 				ev_dis.ev_dis_state = EV_DIS_TASK_FIN_WAIT;
-				printf("EVE DIS moved to EV_DIS_TASK_FIN_WAIT\n");
+				if(debug) printf("EVE DIS moved to EV_DIS_TASK_FIN_WAIT, "
+						"dispatching the task\n");
 			}
+
 			EV_DIS_UNLOCK(&ev_dis);
-			task->ev_cbk(&ev_dis, task->data, task->data_size);
+
+			if(debug) printf("invoking the task\n");
+
+			task->ev_cbk(task->data, task->data_size);
+			task->no_of_invocations++;
+			printf("Job execution finished\n");
+
+			eve_dis_process_task_post_call(task);
+
 			EV_DIS_LOCK(&ev_dis);
 			ev_dis.current_task = NULL;
 		}
@@ -100,7 +144,7 @@ event_dispatcher_dispatch_next_task(void *arg) {
 	return 0;
 }
 
-task_t *
+static task_t *
 create_new_task(void *arg,
 				uint32_t arg_size,
 				event_cbk cbk){
@@ -109,6 +153,7 @@ create_new_task(void *arg,
 	task->data = arg;
 	task->data_size = arg_size;
 	task->ev_cbk = cbk;
+	task->task_type = TASK_ONE_SHOT; /* default */
 	init_glthread(&task->glue);
 	return task;
 }
@@ -128,3 +173,138 @@ event_dispatcher_run(){
 					event_dispatcher_dispatch_next_task,
 					NULL);
 }
+
+task_t *
+eve_dis_get_current_task(){
+
+	return ev_dis.current_task;
+}
+
+
+task_t *
+task_create_new_job(
+	void *data,
+	event_cbk cbk,
+	task_type_t task_type) {
+
+	task_t *task = create_new_task(data, 0, cbk);
+	task->task_type = task_type;
+	event_dispatcher_schedule_task(task);
+	return task;								
+}
+
+void
+task_cancel_job(task_t *task){
+
+	/* Dont kill yourself while you are still executing
+	 * and you are one SHOT */
+	if(ev_dis.current_task->task_type == TASK_ONE_SHOT &&
+		ev_dis.current_task == task) {
+		assert(0);
+	}
+	
+	if (task->task_type == TASK_PKT_Q_JOB) {
+
+		pkt_q_t *pkt_q = (pkt_q_t *)(task->data);
+
+	 	pthread_mutex_lock(&pkt_q->q_mutex);
+		delete_glthread_list(&pkt_q->q_head);
+	 	pthread_mutex_unlock(&pkt_q->q_mutex);
+		
+		EV_DIS_LOCK(&ev_dis);
+		remove_glthread(&pkt_q->glue);
+		remove_glthread(&task->glue);
+		free(task);
+		EV_DIS_UNLOCK(&ev_dis);
+	}
+	else if (task->task_type == TASK_ONE_SHOT ||
+			  task->task_type == TASK_BG ) {
+		EV_DIS_LOCK(&ev_dis);
+		remove_glthread(&task->glue);
+		EV_DIS_UNLOCK(&ev_dis);
+		free(task);	
+	}
+}
+
+typedef struct pkt_{
+
+	char *pkt;
+	uint32_t pkt_size;
+	glthread_t glue;
+} pkt_t;
+GLTHREAD_TO_STRUCT(glue_to_pkt, pkt_t, glue);
+
+static pkt_t *
+task_get_new_pkt(char *pkt, uint32_t pkt_size){
+
+	pkt_t *_pkt = calloc(1, sizeof(pkt_t));
+	_pkt->pkt = pkt;
+	_pkt->pkt_size = pkt_size;
+	init_glthread(&_pkt->glue);
+	return _pkt;
+}
+
+char *
+task_get_next_pkt(uint32_t *pkt_size){
+
+	pkt_t *pkt;
+	task_t *task;
+	char *actual_pkt;
+	glthread_t *curr;
+
+	task = eve_dis_get_current_task();
+
+	pkt_q_t *pkt_q = (pkt_q_t *)(task->data);
+
+	pthread_mutex_lock(&pkt_q->q_mutex);
+	curr = dequeue_glthread_first(&pkt_q->q_head);
+	pthread_mutex_unlock(&pkt_q->q_mutex);
+
+	if(!curr) return NULL;
+
+	pkt = glue_to_pkt(curr);
+
+	actual_pkt = pkt->pkt;
+	*pkt_size = pkt->pkt_size;
+	free(pkt);
+	return actual_pkt;
+}
+
+
+void
+pkt_q_enqueue(pkt_q_t *pkt_q,
+			  char *_pkt, uint32_t pkt_size){
+
+	pkt_t *pkt = task_get_new_pkt(_pkt, pkt_size);
+	
+	if (debug) printf("%s() ... pkt = %s\n", __FUNCTION__, pkt->pkt);
+
+	pthread_mutex_lock(&pkt_q->q_mutex);	
+	glthread_add_next(&pkt_q->q_head, &pkt->glue);
+	pthread_mutex_unlock(&pkt_q->q_mutex);
+
+	EV_DIS_LOCK(&ev_dis);
+	/* Job is already scheduled to run */
+	if (!IS_GLTHREAD_LIST_EMPTY(&pkt_q->task->glue)){
+		EV_DIS_UNLOCK(&ev_dis);
+		return;
+	}
+	EV_DIS_UNLOCK(&ev_dis);
+	if (debug) printf("%s() calling event_dispatcher_schedule_task()\n",
+			__FUNCTION__);
+	event_dispatcher_schedule_task(pkt_q->task);	
+}
+
+void
+init_pkt_q(pkt_q_t *pkt_q, event_cbk cbk){
+
+	init_glthread(&pkt_q->q_head);
+	pthread_mutex_init(&pkt_q->q_mutex, NULL);
+	pkt_q->task = create_new_task((void *)pkt_q,
+								  sizeof(*pkt_q),
+								  cbk);
+	pkt_q->task->task_type = TASK_PKT_Q_JOB;
+	init_glthread(&pkt_q->glue);
+	glthread_add_next(&ev_dis.pkt_queue_head, &pkt_q->glue);
+}
+
