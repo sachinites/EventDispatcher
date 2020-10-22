@@ -42,7 +42,7 @@ event_dispatcher_init(){
 	ev_dis.current_task = NULL;
 }
 
-void
+static void
 event_dispatcher_schedule_task(
 	task_t *task){
 
@@ -107,7 +107,7 @@ eve_dis_process_task_post_call(task_t *task){
 }
 
 
-void *
+static void *
 event_dispatcher_dispatch_next_task(void *arg) {
 
 	task_t *task;
@@ -118,7 +118,6 @@ event_dispatcher_dispatch_next_task(void *arg) {
 	if(debug) printf("Dispatcher Thread started\n");
 
 	while(1) {
-		
 		first_node = dequeue_glthread_first(&ev_dis.task_array_head);
 
 		if(!first_node) {

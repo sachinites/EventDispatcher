@@ -50,12 +50,6 @@ struct task_{
 GLTHREAD_TO_STRUCT(glue_to_task,
 	task_t, glue);
 
-typedef enum {
-
-	EV_DIS_IDLE,
-	EV_DIS_TASK_FIN_WAIT,
-} EV_DISPATCHER_STATE;
-
 struct pkt_q_{
 
 	glthread_t q_head;
@@ -65,6 +59,12 @@ struct pkt_q_{
 };
 GLTHREAD_TO_STRUCT(glue_to_pkt_q,
 	pkt_q_t, glue);
+
+typedef enum {
+
+	EV_DIS_IDLE,
+	EV_DIS_TASK_FIN_WAIT,
+} EV_DISPATCHER_STATE;
 
 struct event_dispatcher_{
 
@@ -90,18 +90,12 @@ struct event_dispatcher_{
 #define EV_DIS_UNLOCK(ev_dis_ptr)	\
 	(pthread_mutex_unlock(&((ev_dis_ptr)->ev_dis_mutex)))
 
+/* To be used by applications */
 task_t *
 eve_dis_get_current_task();
 
 void
 event_dispatcher_init();
-
-void *
-event_dispatcher_dispatch_next_task(void *arg);
-
-void
-event_dispatcher_schedule_task(
-	task_t *task);
 
 void
 event_dispatcher_run();
