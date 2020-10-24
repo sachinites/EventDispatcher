@@ -50,9 +50,9 @@ event_dispatcher_schedule_task(
 
 	EV_DIS_LOCK(&ev_dis);
 
-	if(debug) printf("Task scheduled to run\n");
-	
 	glthread_add_last(&ev_dis.task_array_head, &task->glue);
+	
+	if(debug) printf("Task Added to Dispatcher's Queue\n");
 	
 	ev_dis.pending_task_count++;
 
@@ -60,11 +60,25 @@ event_dispatcher_schedule_task(
 		ev_dis.signal_sent == false) {
 
 		pthread_cond_signal(&ev_dis.ev_dis_cond_wait);
+		ev_dis.signal_sent == true;
 		if(debug) printf("signal sent to dispatcher\n");
-		ev_dis.signal_sent = true;
+		ev_dis.signal_sent_cnt++;
 	}
 
-	EV_DIS_UNLOCK(&ev_dis);
+	if (task->app_cond_var) {
+
+		printf("Syn Task Waiting to return\n");
+		pthread_cond_wait(task->app_cond_var,
+						  &ev_dis.ev_dis_mutex);
+		EV_DIS_UNLOCK(&ev_dis);
+		printf("Syn Task Returned\n");
+		/* Task finished, free now */
+		free(task->app_cond_var);
+		free(task);
+	}
+	else {
+		EV_DIS_UNLOCK(&ev_dis);
+	}
 }
 
 static void
@@ -76,7 +90,15 @@ eve_dis_process_task_post_call(task_t *task){
 
 		case TASK_ONE_SHOT:
 			if(task->re_schedule == false){
-				free(task);
+				if(task->app_cond_var) {
+					/* We will free the task when it will be
+ 					 * unlocked, dont free here */
+					printf("Dispatcher sent Signal Syn Task\n");
+					pthread_cond_signal(task->app_cond_var);
+				}
+				else {
+					free(task);
+				}
 			}
 			else{
 				task->re_schedule = false;
@@ -97,8 +119,9 @@ eve_dis_process_task_post_call(task_t *task){
 				pthread_mutex_unlock(&pkt_q->q_mutex);
 				return;
 			}
+			pthread_mutex_unlock(&pkt_q->q_mutex);
 			if(debug) printf("more pkts in Queue, will continue..\n");
-			event_dispatcher_schedule_task(task);	
+			event_dispatcher_schedule_task(task);
 			break;
 
 		default:
@@ -106,31 +129,40 @@ eve_dis_process_task_post_call(task_t *task){
 	}
 }
 
+static task_t *
+event_dispatcher_get_next_task_to_run(){
+
+	glthread_t *curr;
+	curr = dequeue_glthread_first(&ev_dis.task_array_head);
+	if(!curr) return NULL;
+	return glue_to_task(curr);
+}
 
 static void *
-event_dispatcher_dispatch_next_task(void *arg) {
+event_dispatcher_thread(void *arg) {
 
 	task_t *task;
-	glthread_t *first_node;
 
 	EV_DIS_LOCK(&ev_dis);
 
 	if(debug) printf("Dispatcher Thread started\n");
 
 	while(1) {
-		first_node = dequeue_glthread_first(&ev_dis.task_array_head);
+		
+		task = event_dispatcher_get_next_task_to_run();
 
-		if(!first_node) {
+		if(!task) {
 			ev_dis.ev_dis_state = EV_DIS_IDLE;
 			if(debug) printf("No Task to run, EVE DIS moved to IDLE STATE\n");
 			ev_dis.signal_sent = false;
 			pthread_cond_wait(&ev_dis.ev_dis_cond_wait,
 					&ev_dis.ev_dis_mutex);
-			if(debug) printf("Eve Dis recvd Signal, woken up\n");
+			ev_dis.signal_recv_cnt++;
+			if(debug) printf("Eve Dis recvd Signal # %u, woken up\n",
+					ev_dis.signal_recv_cnt);
 		}
 		else {
 			ev_dis.pending_task_count--;
-			task = glue_to_task(first_node);
 			ev_dis.current_task = task;
 			
 			if(ev_dis.ev_dis_state != EV_DIS_TASK_FIN_WAIT){
@@ -145,7 +177,7 @@ event_dispatcher_dispatch_next_task(void *arg) {
 
 			task->ev_cbk(task->data, task->data_size);
 			task->no_of_invocations++;
-			printf("Job execution finished\n");
+			if(debug) printf("Job execution finished\n");
 
 			eve_dis_process_task_post_call(task);
 
@@ -174,6 +206,9 @@ create_new_task(void *arg,
 void
 task_schedule_again(task_t *task){
 
+	if(task == NULL) {
+		task = eve_dis_get_current_task();
+	}
 	assert(task->task_type == TASK_ONE_SHOT);
 	task->re_schedule = true;
 }
@@ -190,7 +225,7 @@ event_dispatcher_run(){
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	pthread_create(event_dis_thread, &attr,
-					event_dispatcher_dispatch_next_task,
+					event_dispatcher_thread,
 					NULL);
 }
 
@@ -209,6 +244,20 @@ task_create_new_job(
 
 	task_t *task = create_new_task(data, 0, cbk);
 	task->task_type = task_type;
+	event_dispatcher_schedule_task(task);
+	return task;								
+}
+
+task_t *
+task_create_new_job_synchronous(
+	void *data,
+	event_cbk cbk,
+	task_type_t task_type) {
+
+	task_t *task = create_new_task(data, 0, cbk);
+	task->task_type = task_type;
+	task->app_cond_var = calloc(1, sizeof(pthread_cond_t));
+	pthread_cond_init(task->app_cond_var, 0);
 	event_dispatcher_schedule_task(task);
 	return task;								
 }

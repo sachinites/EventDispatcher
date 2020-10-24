@@ -105,7 +105,7 @@ main(int argc, char **argv){
 	char pkt1[] = "This is first pkt";
 	char pkt2[] = "This is second pkt";
 	char pkt3[] = "This is third pkt";
-	for(; i < 5; i++){
+	for(; i < 15; i++){
 		pkt_q_enqueue(&pkt_queue3, pkt3, sizeof(pkt3));
 		pkt_q_enqueue(&pkt_queue1, pkt1, sizeof(pkt1));
 		pkt_q_enqueue(&pkt_queue1, pkt1, sizeof(pkt1));
